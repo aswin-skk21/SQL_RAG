@@ -4,10 +4,13 @@ from langchain_community.vectorstores import Chroma
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain.chat_models import init_chat_model
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_community.document_loaders import DirectoryLoader
 from langchain_community.document_loaders import JSONLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.chains import create_history_aware_retriever, create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_core.messages import HumanMessage, AIMessage
 
 load_dotenv()
 api_key = os.getenv("GOOGLE_API_KEY")
@@ -59,10 +62,24 @@ else:
 
 llm = init_chat_model("gemini-2.0-flash", model_provider="google_genai")
 
-user_query = input("What SQL script do you need? \n")
+retreiver = vector_store.as_retriever(search_kwargs={"k": 5})
 
-retreived_docs = vector_store.similarity_search(user_query)
-docs_content = "\n\n".join([doc.page_content for doc in retreived_docs])
+
+followup_prompt = """Given the following conversation and a follow up question, rephrase the follow up question to be a standalone question, in its original language.
+If the user's question is *not* about generating a SQL query, formulate it as a standalone question that can be answered by a general LLM without needing database context.
+Do NOT answer the question, just reformulate it if needed, otherwise return it as is."""
+
+follow_up_prompt = ChatPromptTemplate.from_messages([
+    ("system", followup_prompt), 
+    MessagesPlaceholder("chat_history"),
+    ("human", "{input}")
+])
+
+hr = create_history_aware_retriever (
+    llm,
+    retreiver, 
+    follow_up_prompt
+)
 
 sql_prompt_template = ChatPromptTemplate.from_messages(
     [
@@ -71,41 +88,48 @@ sql_prompt_template = ChatPromptTemplate.from_messages(
 
 **Your Primary Goal:**
 To translate natural language questions into accurate SQL queries using provided database schema.
-If the user's question is *not* about generating a SQL query, act as a helpful and knowledgeable standard Large Language Model and respond appropriately.
+You can also answer direct questions about the schema if the information is available in the context.
 
-**Database Schema (provided by RAG context, if available):**
+**Database Schema (provided by RAG context):**
 {context}
 
 **User Question:**
-{question}
+{input}
 
-**Instructions for SQL Generation (if applicable):**
-1.  **If the user asks for a SQL query and relevant schema IS provided in '{context}':**
+**Instructions:**
+1.  **If the user asks for a SQL query or a script:**
     * Generate a complete, valid, and syntactically correct SQL query that directly answers the user's question, using ONLY the tables and columns explicitly present in the provided schema.
-    * Ensure proper SQL syntax (SELECT, FROM, WHERE, JOIN, GROUP BY, ORDER BY, LIMIT, etc.).
-    * Do NOT invent tables, columns, or relationships not in the provided schema.
     * Respond ONLY with the SQL query and nothing else (no introductory phrases, explanations, or markdown fences).
-
-2.  **If the user asks for a SQL query but NO relevant schema is provided in '{context}' (i.e., 'context' is empty or irrelevant):**
-    * Provide a generic SQL script structure that attempts to fulfill the user's request.
-    * Leave specific database, table, or column names as placeholders (e.g., `<your_database>`, `<your_table>`, `<your_column>`) where the information is missing from the context.
-    * Include comments within the SQL script to guide the user on what information they need to fill in.
-    * Respond ONLY with the generic SQL script and nothing else.
-
-3.  **If the user's question is NOT about generating a SQL query (e.g., "What is the capital of France?", "Tell me a joke"):**
+2.  **If the user asks a direct question that can be answered from the provided schema context (e.g., "how many databases are on this server?", "what tables are in the Aimsweb database?"):**
+    * Analyze the '{context}' and provide a clear, concise, and direct answer in plain language.
+    * Do NOT generate a SQL query. The goal is to provide information, not code.
+3.  **If the user's question is NOT about generating a SQL query or is a general knowledge question (e.g., "What is the capital of France?", "Tell me a joke"):**
     * Act as a standard, helpful Large Language Model. Respond directly and comprehensively to their non-SQL question.
     * Do NOT generate any SQL or SQL-related placeholders.
 
 **SQL Query (or Standard LLM Response):**"""
         ),
-        ("human", "{question}")
+        MessagesPlaceholder("chat_history"),
+        ("human", "{input}")
     ]
 )
 
-prompt = sql_prompt_template.invoke({"question": user_query, "context": docs_content})
+combined_chain = create_stuff_documents_chain(llm, sql_prompt_template)
 
-llm_output = llm.invoke(prompt)
+rag_chain = create_retrieval_chain(hr, combined_chain)
 
-generated_sql = llm_output.content
+chat_history = []
 
-print(generated_sql)
+print("\nHow may I help you? Type 'exit' to quit.\n")
+
+while True:
+    user_query = input("You: ")
+    if user_query.lower() == 'exit':
+        print("Exiting conversation.")
+        break
+    response_obj = rag_chain.invoke({"input": user_query, "chat_history": chat_history})
+    generated_content = response_obj['answer']
+    print(f"Bot: {generated_content}")
+
+chat_history.extend([HumanMessage(content=user_query), AIMessage(content=generated_content)])
+
