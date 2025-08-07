@@ -12,124 +12,106 @@ from langchain.chains import create_history_aware_retriever, create_retrieval_ch
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.messages import HumanMessage, AIMessage
 
-load_dotenv()
-api_key = os.getenv("GOOGLE_API_KEY")
-if not api_key:
-    raise ValueError("GOOGLE_API_KEY environment variable not set.")
 
-loader = DirectoryLoader(
-    "./JSON",  
-    glob="**/*.jsonl",  
-    loader_cls=JSONLoader,  
-    loader_kwargs={  
-        "jq_schema": ".",  
-        "text_content": False,
-        "json_lines": True  
-    }
-)
-docs = loader.load() 
-print("loaded")
+def initialize_rag():
+    load_dotenv()
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        raise ValueError("GOOGLE_API_KEY environment variable not set.")
 
-text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=1000,  
-    chunk_overlap=200,  
-    length_function=len, 
-    add_start_index=True 
-)
-chunks = text_splitter.split_documents(docs)
-print("chunked")
-
-embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
-
-persist_directory = "./chroma_langchain_db"
-
-if os.path.exists(persist_directory) and os.listdir(persist_directory):
-    print(f"Loading existing vector store from {persist_directory}")
-    vector_store = Chroma(
-        persist_directory=persist_directory,
-        embedding_function=embeddings,
-        collection_name="SQL_RAG"  
+    loader = DirectoryLoader(
+        "./JSON",  
+        glob="**/*.jsonl",  
+        loader_cls=JSONLoader,  
+        loader_kwargs={  
+            "jq_schema": ".",  
+            "text_content": False,
+            "json_lines": True  
+        }
     )
-else:
-    print("Creating new vector store and embedding documents...")
-    vector_store = Chroma.from_documents(
-        documents=chunks,  
-        embedding=embeddings,  
-        collection_name="SQL_RAG",  
-        persist_directory=persist_directory  
+    docs = loader.load() 
+    print("loaded")
+
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,  
+        chunk_overlap=200,  
+        length_function=len, 
+        add_start_index=True 
     )
-    print("Embedded using transformer and persisted.")
+    chunks = text_splitter.split_documents(docs)
+    print("chunked")
 
-llm = init_chat_model("gemini-2.0-flash", model_provider="google_genai")
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
+    persist_directory = "./chroma_langchain_db"
 
-retreiver = vector_store.as_retriever(search_kwargs={"k": 5})
+    if os.path.exists(persist_directory) and os.listdir(persist_directory):
+        print(f"Loading existing vector store from {persist_directory}")
+        vector_store = Chroma(
+            persist_directory=persist_directory,    
+            embedding_function=embeddings,
+            collection_name="SQL_RAG"  
+        )
+    else:
+        print("Creating new vector store and embedding documents...")
+        vector_store = Chroma.from_documents(
+            documents=chunks,  
+            embedding=embeddings,  
+            collection_name="SQL_RAG",  
+            persist_directory=persist_directory  
+        )
+        print("Embedded using transformer and persisted.")
 
+    llm = init_chat_model("gemini-2.0-flash", model_provider="google_genai")
+    retreiver = vector_store.as_retriever(search_kwargs={"k": 5})
 
-followup_prompt = """Given the following conversation and a follow up question, rephrase the follow up question to be a standalone question, in its original language.
-If the user's question is *not* about generating a SQL query, formulate it as a standalone question that can be answered by a general LLM without needing database context.
-Do NOT answer the question, just reformulate it if needed, otherwise return it as is."""
+    followup_prompt = """Given the following conversation and a follow up question, rephrase the follow up question to be a standalone question, in its original language.\nIf the user's question is *not* about generating a SQL query, formulate it as a standalone question that can be answered by a general LLM without needing database context.\nDo NOT answer the question, just reformulate it if needed, otherwise return it as is."""
+    follow_up_prompt = ChatPromptTemplate.from_messages([
+        ("system", followup_prompt), 
+        MessagesPlaceholder("chat_history"),
+        ("human", "{input}")
+    ])
+    hr = create_history_aware_retriever (
+        llm,
+        retreiver, 
+        follow_up_prompt
+    )
 
-follow_up_prompt = ChatPromptTemplate.from_messages([
-    ("system", followup_prompt), 
-    MessagesPlaceholder("chat_history"),
-    ("human", "{input}")
-])
-
-hr = create_history_aware_retriever (
-    llm,
-    retreiver, 
-    follow_up_prompt
-)
-
-sql_prompt_template = ChatPromptTemplate.from_messages(
-    [
+    # Set up the main SQL prompt
+    sql_prompt_template = ChatPromptTemplate.from_messages([
         ("system",
-         """You are an expert SQL developer and a versatile database assistant.
-
-**Your Primary Goal:**
-To translate natural language questions into accurate SQL queries using provided database schema.
-You can also answer direct questions about the schema if the information is available in the context.
-
-**Database Schema (provided by RAG context):**
-{context}
-
-**User Question:**
-{input}
-
-**Instructions:**
-1.  **If the user asks for a SQL query or a script:**
-    * Generate a complete, valid, and syntactically correct SQL query that directly answers the user's question, using ONLY the tables and columns explicitly present in the provided schema.
-    * Respond ONLY with the SQL query and nothing else (no introductory phrases, explanations, or markdown fences).
-2.  **If the user asks a direct question that can be answered from the provided schema context (e.g., "how many databases are on this server?", "what tables are in the Aimsweb database?"):**
-    * Analyze the '{context}' and provide a clear, concise, and direct answer in plain language.
-    * Do NOT generate a SQL query. The goal is to provide information, not code.
-3.  **If the user's question is NOT about generating a SQL query or is a general knowledge question (e.g., "What is the capital of France?", "Tell me a joke"):**
-    * Act as a standard, helpful Large Language Model. Respond directly and comprehensively to their non-SQL question.
-    * Do NOT generate any SQL or SQL-related placeholders.
-
-**SQL Query (or Standard LLM Response):**"""
+         """You are an expert SQL developer and a versatile database assistant.\n\n**Your Primary Goal:**\nTo translate natural language questions into accurate SQL queries using provided database schema.\nYou can also answer direct questions about the schema if the information is available in the context.\n\n**Database Schema (provided by RAG context):**\n{context}\n\n**User Question:**\n{input}\n\n**Instructions:**\n1.  **If the user asks for a SQL query or a script:**\n    * Generate a complete, valid, and syntactically correct SQL query that directly answers the user's question, using ONLY the tables and columns explicitly present in the provided schema.\n    * Respond ONLY with the SQL query and nothing else (no introductory phrases, explanations, or markdown fences).\n2.  **If the user asks a direct question that can be answered from the provided schema context (e.g., \"how many databases are on this server?\", \"what tables are in the Aimsweb database?\"):**\n    * Analyze the '{context}' and provide a clear, concise, and direct answer in plain language.\n    * Do NOT generate a SQL query. The goal is to provide information, not code.\n3.  **If the user's question is NOT about generating a SQL query or is a general knowledge question (e.g., \"What is the capital of France?\", \"Tell me a joke\"):**\n    * Act as a standard, helpful Large Language Model. Respond directly and comprehensively to their non-SQL question.\n    * Do NOT generate any SQL or SQL-related placeholders.\n\n**SQL Query (or Standard LLM Response):**"""
         ),
         MessagesPlaceholder("chat_history"),
         ("human", "{input}")
-    ]
-)
+    ])
+    combined_chain = create_stuff_documents_chain(llm, sql_prompt_template)
+    rag_chain = create_retrieval_chain(hr, combined_chain)
+    return rag_chain
 
-combined_chain = create_stuff_documents_chain(llm, sql_prompt_template)
 
-rag_chain = create_retrieval_chain(hr, combined_chain)
+def get_rag_response(user_query, chat_history, rag_chain):
 
-chat_history = []
+    # Call the RAG chain with the user query and chat history
+    response_obj = rag_chain.invoke({
+        "input": user_query,
+        "chat_history": chat_history
+    })
+    answer = response_obj['answer']
+    # Update chat history with the new question and answer
+    chat_history.append(HumanMessage(content=user_query))
+    chat_history.append(AIMessage(content=answer))
+    return answer, chat_history
 
-print("\nHow may I help you? Type 'exit' to quit.\n")
-
-while True:
-    user_query = input("You: ")
-    if user_query.lower() == 'exit':
-        print("Exiting conversation.")
-        break
-    response_obj = rag_chain.invoke({"input": user_query, "chat_history": chat_history})
-    generated_content = response_obj['answer']
-    print(f"Bot: {generated_content}")
-
-chat_history.extend([HumanMessage(content=user_query), AIMessage(content=generated_content)])
+# If you want to test this file directly, you can add a __main__ block here
+if __name__ == "__main__":
+    rag_chain = initialize_rag()
+    chat_history = []
+    print("\nHow may I help you? Type 'exit' to quit.\n")
+    while True:
+        user_query = input("You: ")
+        if user_query.lower() == 'exit':
+            print("Exiting conversation.")
+            break
+        answer, chat_history = get_rag_response(user_query, chat_history, rag_chain)
+        print(f"Bot: {answer}")
 
