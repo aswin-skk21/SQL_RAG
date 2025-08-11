@@ -44,7 +44,7 @@ def initialize_rag():
     embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
     persist_directory = "./chroma_langchain_db"
 
-    if os.path.exists(persist_directory) and os.listdir(persist_directory):
+    if os.path.exists(persist_directory) and os.listdir(persist_directory): #place for improvement, update as well not just check if it exists
         print(f"Loading existing vector store from {persist_directory}")
         vector_store = Chroma(
             persist_directory=persist_directory,    
