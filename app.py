@@ -1,18 +1,13 @@
 from flask import Flask, render_template, request, jsonify 
-import rag.py as rag
+from rag import initialize_rag, get_rag_response
 
 app = Flask(__name__)
 
-@app.route('/')
-@app.route('/chat')
+@app.route('/', methods=['GET'])
+@app.route('/chat', methods=['POST'])
 
 def index():
-    return "hello world"
+    return render_template('index.html')
 
 if __name__ == '__main__':
     app.run(debug=True)
-
-@app.route('/get', methods=['GET', 'POST'])
-
-def get_rag_response():
-    
