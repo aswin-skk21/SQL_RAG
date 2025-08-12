@@ -115,3 +115,4 @@ if __name__ == "__main__":
         answer, chat_history = get_rag_response(user_query, chat_history, rag_chain)
         print(f"Bot: {answer}")
 
+  
