@@ -79,8 +79,9 @@ body {
 .message-time {
     font-size: 0.75em;
     color: #999;
-    margin-top: 5px;
+    margin-top: 12px;
     text-align: center;
+    margin-bottom: 8px;
 }
 
 .chat-input-container {
@@ -192,4 +193,4 @@ body {
     .message-content {
         max-width: 85%;
     }
-} 
+}
