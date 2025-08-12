@@ -32,7 +32,7 @@ ENV/
 
 # Vector store
 chroma_langchain_db/
-chroma_langchain_db_test/
+chroma_langchain_db_optimized/
 
 # IDE
 .vscode/
